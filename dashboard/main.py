@@ -181,15 +181,12 @@ class ReactorViz:
         return 0.0                          # danger
 
     def _health_score(self, v, slo, shi, wlo, whi):
-        """Continuous score: 1.0 in safe zone, ≤0.5 anywhere in amber warning zone, 0 at danger."""
+        """1.0 in safe zone, sqrt(0.5) in amber zone (so both-amber × both-amber = 0.50), 0 in danger."""
         if slo <= v <= shi:
             return 1.0
-        if v < slo:
-            if v <= wlo: return 0.0
-            return 0.5 * (v - wlo) / (slo - wlo)   # warn zone: 0 → 0.5
-        # v > shi
-        if v >= whi: return 0.0
-        return 0.5 * (whi - v) / (whi - shi)        # warn zone: 0.5 → 0
+        if wlo < v < slo or shi < v < whi:
+            return math.sqrt(0.5)   # both orange → sqrt(0.5)² = 0.5 (50 % health)
+        return 0.0
 
     def update(self, state: ADState):
         ph_h   = self._health_score(state.ph,          PH_SAFE_LO,   PH_SAFE_HI,   PH_WARN_LO,   PH_WARN_HI)
