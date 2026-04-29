@@ -31,9 +31,14 @@ REACTOR_CX  = LEFT_W  // 2            # 215
 REACTOR_CY  = MAIN_TOP + MAIN_H // 2  # 405
 
 # Gauge positions (side-by-side in right panel)
-TEMP_GX, PH_GX, GAUGE_GY = 1050, 1275, REACTOR_CY
-GAUGE_R  = 100
-SLIDER_Y = GAUGE_GY + GAUGE_R + 70    # 575 — slider track top, under gauges (clear of flow arrows)
+TEMP_GX, PH_GX, GAUGE_GY = 1050, 1275, REACTOR_CY - 40
+GAUGE_R  = 90
+SLIDER_Y = MAIN_BOT + 20              # below main area — demo sliders
+# Biogas time-series chart (right panel, below the two gauges)
+BIOGAS_CHART_X = RIGHT_X + 15
+BIOGAS_CHART_Y = GAUGE_GY + GAUGE_R + 48
+BIOGAS_CHART_W = SCREEN_W - RIGHT_X - 25
+BIOGAS_CHART_H = MAIN_BOT - BIOGAS_CHART_Y - 10
 
 # ── Serial constants ──────────────────────────────────────────────────────────
 BAUD_RATE     = 115200
@@ -152,6 +157,57 @@ class DataProcessor:
         if self._smooth_temp < TEMP_SAFE_LO - 1.0:  self._smooth_temp += 0.10
         if self._smooth_temp > TEMP_SAFE_HI + 1.0:  self._smooth_temp -= 0.10
         return ADState(self._smooth_temp, self._smooth_ph, olr)
+
+
+# ── Feedstock icon helper ─────────────────────────────────────────────────────
+def _draw_feedstock_icons(surf: pygame.Surface, panel_cx: int, bottom_y: int,
+                          font: pygame.font.Font):
+    """Draw maize silage, food waste, cattle slurry horizontally at bottom of reactor panel."""
+    feedstocks = [
+        ("Maize Silage",  (240, 190,  40), (80, 160,  60), "corn"),
+        ("Food Waste",    (220,  80,  50), (60, 140,  40), "apple"),
+        ("Cattle Slurry", (160, 110,  50), (90,  65,  30), "cow"),
+    ]
+    spacing = 128
+    r = 18
+    n = len(feedstocks)
+    start_x = panel_cx - (n - 1) * spacing // 2
+    iy = bottom_y - 52   # icon center y
+
+    # Section title
+    title = font.render("FEEDSTOCKS", True, MID_GRAY)
+    surf.blit(title, title.get_rect(centerx=panel_cx, centery=iy - r - 14))
+
+    for i, (label, body, detail, shape) in enumerate(feedstocks):
+        ix = start_x + i * spacing
+
+        if shape == "corn":
+            pygame.draw.ellipse(surf, body,   (ix - 8, iy - r,     16, r * 2))
+            pygame.draw.polygon(surf, detail, [(ix - 8, iy - r), (ix - 16, iy - r - 8), (ix, iy - r + 6)])
+            pygame.draw.polygon(surf, detail, [(ix + 8, iy - r), (ix + 16, iy - r - 8), (ix, iy - r + 6)])
+            for row in range(3):
+                for col in range(2):
+                    pygame.draw.circle(surf, (220, 150, 20),
+                                       (ix - 3 + col * 7, iy - 8 + row * 8), 2)
+
+        elif shape == "apple":
+            pygame.draw.circle(surf, body,   (ix, iy + 2), r)
+            pygame.draw.ellipse(surf, detail, (ix - 1, iy - r - 7, 14, 9))
+            pygame.draw.line(surf, (100, 60, 20), (ix + 5, iy - r), (ix + 7, iy - r - 9), 2)
+            pygame.draw.circle(surf, (255, 130, 100), (ix - 6, iy - 4), 5)
+
+        elif shape == "cow":
+            pygame.draw.ellipse(surf, body, (ix - r, iy - 8, r * 2, 17))
+            pygame.draw.circle(surf, body,  (ix + r - 2, iy - 4), 9)
+            pygame.draw.ellipse(surf, (200, 150, 100), (ix + r + 3, iy - 11, 6, 8))
+            pygame.draw.ellipse(surf, detail, (ix - 8, iy - 5, 10, 6))
+            pygame.draw.ellipse(surf, detail, (ix + 2, iy + 1, 7, 5))
+            for lx in (ix - 10, ix - 3, ix + 4, ix + 11):
+                pygame.draw.line(surf, (120, 80, 30), (lx, iy + 9), (lx, iy + 17), 2)
+
+        # Label below icon
+        lbl = font.render(label, True, TEXT)
+        surf.blit(lbl, lbl.get_rect(centerx=ix, top=iy + r + 4))
 
 
 # ── Animated bioreactor ───────────────────────────────────────────────────────
@@ -292,6 +348,8 @@ class ReactorViz:
         surf.blit(font_lbl.render("INLET", True, pipe_col),
                   font_lbl.render("INLET", True, pipe_col)
                   .get_rect(right=cx - w//2 - 33, centery=cy + h//4))
+        # ── Feedstock icons at bottom of reactor panel ────────────────────────
+        _draw_feedstock_icons(surf, cx, cy + h//2 + 80, font_lbl)
 
         # Outlet pipe (right — upper third, effluent out)
         pygame.draw.rect(surf, pipe_col,
@@ -537,14 +595,68 @@ class FlowPanel:
         self._pipe(surf, cx, box1.bottom, box1.bottom + 40, MID_GRAY)
 
         if not ai_mode:
-            # ── Manual: Direct Control block ──────────────────────────────────
-            box2 = pygame.Rect(cx - 170, box1.bottom + 40, 340, 120)
-            self._draw_box(surf, box2, "DIRECT CONTROL",
-                           ["2.5 s Dead-time Delay",
-                            "High-Inertia Response",
-                            "No AI Filtering"],
-                           RED, font_title, font_body)
-            # Packets slow and queue inside the delay box, then burst every ~3 s
+            # ── MANUAL: Operator illustration ─────────────────────────────────
+            box2 = pygame.Rect(cx - 170, box1.bottom + 40, 340, 210)
+            pygame.draw.rect(surf, PANEL_MID, box2, border_radius=12)
+            pygame.draw.rect(surf, RED, box2, 2, border_radius=12)
+            surf.blit(font_title.render("OPERATOR CONTROL", True, RED),
+                      font_title.render("OPERATOR CONTROL", True, RED)
+                      .get_rect(centerx=box2.centerx, centery=box2.y + 20))
+
+            # ── Draw operator person with hard hat ─────────────────────────────
+            ox, oy = box2.centerx, box2.y + 118
+
+            # Hard hat brim (yellow flat ellipse)
+            pygame.draw.ellipse(surf, (240, 200, 20), (ox - 28, oy - 60, 56, 12))
+            # Hard hat dome
+            pygame.draw.ellipse(surf, (240, 200, 20), (ox - 20, oy - 72, 40, 26))
+            # Hat strap shadow
+            pygame.draw.line(surf, (180, 145, 10), (ox - 28, oy - 55), (ox + 28, oy - 55), 2)
+
+            # Head
+            pygame.draw.circle(surf, (220, 175, 130), (ox, oy - 42), 16)
+            # Eyes
+            pygame.draw.circle(surf, (40, 40, 80), (ox - 5, oy - 44), 2)
+            pygame.draw.circle(surf, (40, 40, 80), (ox + 5, oy - 44), 2)
+            # Smile
+            pygame.draw.arc(surf, (160, 100, 60),
+                            pygame.Rect(ox - 6, oy - 40, 12, 7), math.pi, 2 * math.pi, 2)
+
+            # Hi-vis vest body (orange)
+            body_pts = [(ox - 22, oy - 26), (ox + 22, oy - 26),
+                        (ox + 18, oy + 18),  (ox - 18, oy + 18)]
+            pygame.draw.polygon(surf, (220, 100, 20), body_pts)
+            # Vest reflective stripes (yellow horizontal)
+            for sy in (oy - 10, oy + 4):
+                pygame.draw.line(surf, (240, 230, 30), (ox - 20, sy), (ox + 20, sy), 3)
+
+            # Left arm
+            pygame.draw.line(surf, (220, 100, 20), (ox - 22, oy - 22), (ox - 34, oy + 8), 5)
+            pygame.draw.line(surf, (220, 175, 130), (ox - 34, oy + 8), (ox - 38, oy + 20), 4)
+            # Right arm — holding clipboard
+            pygame.draw.line(surf, (220, 100, 20), (ox + 22, oy - 22), (ox + 32, oy + 4), 5)
+            pygame.draw.line(surf, (220, 175, 130), (ox + 32, oy + 4), (ox + 36, oy + 16), 4)
+            # Clipboard
+            pygame.draw.rect(surf, (240, 235, 215), (ox + 34, oy + 12, 20, 26), border_radius=2)
+            pygame.draw.rect(surf, (160, 150, 130), (ox + 34, oy + 12, 20, 26), 1, border_radius=2)
+            pygame.draw.rect(surf, (100, 100, 180), (ox + 36, oy + 10, 16, 5), border_radius=2)
+            for ly in (oy + 20, oy + 26, oy + 32):
+                pygame.draw.line(surf, (160, 150, 130), (ox + 37, ly), (ox + 51, ly), 1)
+
+            # Legs
+            pygame.draw.line(surf, (60, 80, 130), (ox - 10, oy + 18), (ox - 12, oy + 44), 6)
+            pygame.draw.line(surf, (60, 80, 130), (ox + 10, oy + 18), (ox + 12, oy + 44), 6)
+            # Boots
+            pygame.draw.rect(surf, (40, 40, 40), (ox - 18, oy + 42, 14, 8), border_radius=3)
+            pygame.draw.rect(surf, (40, 40, 40), (ox + 5,  oy + 42, 14, 8), border_radius=3)
+
+            # Sub-labels
+            for i, txt in enumerate(["Manual input", "2.5 s delay", "No AI filtering"]):
+                surf.blit(font_body.render(txt, True, MID_GRAY),
+                          font_body.render(txt, True, MID_GRAY)
+                          .get_rect(centerx=box2.centerx, centery=box2.bottom - 52 + i * 18))
+
+            # Slow-packet animation (delay queue)
             self._burst_timer = (self._burst_timer + 1) % 190
             pipe_len = (box2.bottom + 40 + 78) - box1.bottom
             for p in self.manual_pts:
@@ -553,7 +665,7 @@ class FlowPanel:
                 if in_delay:
                     p['speed'] = max(0.0008, p['speed'] * 0.97)
                     if self._burst_timer < 12:
-                        p['speed'] = 0.012   # burst flush
+                        p['speed'] = 0.012
                 else:
                     p['speed'] = min(0.005, p['speed'] * 1.02)
                 p['p'] = (p['p'] + p['speed']) % 1.0
@@ -564,41 +676,104 @@ class FlowPanel:
                     pygame.draw.circle(surf, (bright, 50, 50), (cx, py), 5)
 
             self._pipe(surf, cx, box2.bottom, box2.bottom + 40, MID_GRAY)
-
-            # Manual output box
             box3 = pygame.Rect(cx - 170, box2.bottom + 40, 340, 78)
             self._draw_box(surf, box3, "GAUGE OUTPUT (DELAYED)",
                            [f"T = {out.temperature:.1f} °C       pH = {out.ph:.2f}"],
                            RED, font_title, font_body)
 
         else:
-            # ── AI: Digital Twin block ────────────────────────────────────────
-            box2 = pygame.Rect(cx - 180, box1.bottom + 40, 360, 260)
-            self._draw_box(surf, box2, "DIGITAL TWIN MODEL",
-                           ["Hybrid AI Model",
-                            "Real-time State Estimation",
-                            "Predictive Control",
-                            "Shock-load Compensation"],
-          
-                           BLUE, font_title, font_body, pulse=pulse)
+            # ── AI: Digital Twin Process diagram ──────────────────────────────
+            box2 = pygame.Rect(cx - 180, box1.bottom + 40, 360, 290)
+            pygame.draw.rect(surf, PANEL_MID, box2, border_radius=12)
+            bc = tuple(min(255, int(c + pulse * 80)) for c in BLUE)
+            pygame.draw.rect(surf, bc, box2, 2, border_radius=12)
 
-            # Mini virtual reactor inside the DT box
-            mr = pygame.Rect(box2.centerx - 42, box2.y + 130, 84, 100)
-            pygame.draw.rect(surf, (52, 58, 92), mr, border_radius=10)
-            # Mini liquid (always stable green in DT)
-            ml = pygame.Rect(mr.x + 4, mr.y + 4, mr.w - 8, mr.h - 8)
-            pygame.draw.rect(surf, (80, 160, 80), ml, border_radius=7)
-            # Mini bubbles
+            # Title
+            surf.blit(font_title.render("THE DIGITAL TWIN PROCESS", True, BLUE),
+                      font_title.render("THE DIGITAL TWIN PROCESS", True, BLUE)
+                      .get_rect(centerx=box2.centerx, centery=box2.y + 18))
+
+            # ── Monitor shell ──────────────────────────────────────────────────
+            mon_w, mon_h = 196, 128
+            mon_x = box2.centerx - mon_w // 2
+            mon_y = box2.y + 34
+            pygame.draw.rect(surf, (50, 62, 100), (mon_x, mon_y, mon_w, mon_h), border_radius=8)
+            scr = pygame.Rect(mon_x + 5, mon_y + 5, mon_w - 10, mon_h - 10)
+            pygame.draw.rect(surf, (18, 24, 50), scr, border_radius=5)
+            # Stand + base
+            pygame.draw.rect(surf, (70, 82, 120), (box2.centerx - 14, mon_y + mon_h, 28, 11), border_radius=3)
+            pygame.draw.rect(surf, (70, 82, 120), (box2.centerx - 36, mon_y + mon_h + 11, 72, 7), border_radius=3)
+            pygame.draw.rect(surf, (110, 130, 190), (mon_x, mon_y, mon_w, mon_h), 2, border_radius=8)
+
+            # ── Left screen half: Virtual AD Reactor ──────────────────────────
+            lr = pygame.Rect(scr.x + 2, scr.y + 2, scr.w // 2 - 3, scr.h - 4)
+            pygame.draw.rect(surf, (50, 60, 98), lr, border_radius=4)
+            liq = pygame.Rect(lr.x + 3, lr.y + 3, lr.w - 6, lr.h - 6)
+            liq_col = (int(70 + 0.7 * 120), int(60 + 0.7 * 100), int(20 + 0.7 * 30))
+            pygame.draw.rect(surf, liq_col, liq, border_radius=3)
+            for i in range(5):
+                bx2 = liq.x + 5 + i * (liq.w // 5)
+                by2 = int(liq.y + 5 + liq.h * (0.15 + 0.7 * ((tick * 0.025 + i * 0.55) % 1.0)))
+                by2 = max(liq.y + 3, min(liq.bottom - 3, by2))
+                pygame.draw.circle(surf, (180, 220, 255), (bx2, by2), 2)
+            pygame.draw.rect(surf, (90, 110, 180), lr, 1, border_radius=4)
+            ll = font_body.render("VIRTUAL AD", True, (200, 225, 255))
+            surf.blit(ll, ll.get_rect(centerx=lr.centerx, bottom=lr.bottom - 1))
+
+            # ── Right screen half: Biochemical Network ─────────────────────────
+            rr = pygame.Rect(scr.x + scr.w // 2 + 1, scr.y + 2, scr.w // 2 - 3, scr.h - 4)
+            pygame.draw.rect(surf, (22, 30, 58), rr, border_radius=4)
+            ncx2, ncy2 = rr.centerx, rr.y + rr.h // 2 - 6
+            nr2 = 20
+            node_cols = [(0, 180, 80), (200, 120, 30), (60, 140, 220), (200, 60, 60)]
+            nangles = [math.radians(a + tick * 0.5) for a in (0, 90, 180, 270)]
+            npos = [(int(ncx2 + nr2 * math.cos(a)), int(ncy2 + nr2 * math.sin(a))) for a in nangles]
             for i in range(4):
-                bx = ml.x + 10 + i * 16
-                by = int(ml.y + ml.h * (0.3 + 0.6 * ((tick * 0.03 + i * 0.7) % 1.0)))
-                pygame.draw.circle(surf, (180, 220, 255), (bx, by), 3)
-            pygame.draw.rect(surf, (80, 100, 160), mr, 2, border_radius=10)
-            surf.blit(font_body.render("Virtual AD Reactor", True, TEXT),
-                      font_body.render("Virtual AD Reactor", True, TEXT)
-                      .get_rect(centerx=box2.centerx, centery=mr.bottom + 10))
+                pygame.draw.line(surf, (70, 95, 140), npos[i], npos[(i + 1) % 4], 1)
+                pygame.draw.line(surf, (70, 95, 140), npos[i], (ncx2, ncy2), 1)
+            for i, (nx2, ny2) in enumerate(npos):
+                pygame.draw.circle(surf, node_cols[i], (nx2, ny2), 4)
+            pygame.draw.circle(surf, (120, 180, 240), (ncx2, ncy2), 5)
+            pygame.draw.rect(surf, (90, 110, 180), rr, 1, border_radius=4)
+            rl = font_body.render("BIO NETWORK", True, (200, 225, 255))
+            surf.blit(rl, rl.get_rect(centerx=rr.centerx, bottom=rr.bottom - 1))
 
-            # Fast glowing AI packets flowing smoothly through the pipe
+            # ── Side labels ────────────────────────────────────────────────────
+            lbl_left  = [("Hybrid", "AI Model"), ("Real-time", "State Est.")]
+            lbl_right = [("Predictive", "Control"), ("Shock-load", "Comp.")]
+            lbw = 66
+            for i, (l1, l2) in enumerate(lbl_left):
+                ly = mon_y + 16 + i * 58
+                lbx = box2.left + 4
+                pygame.draw.rect(surf, PANEL_MID, (lbx, ly - 13, lbw, 34), border_radius=5)
+                pygame.draw.rect(surf, BLUE,      (lbx, ly - 13, lbw, 34), 1, border_radius=5)
+                surf.blit(font_body.render(l1, True, TEXT), (lbx + 4, ly - 10))
+                surf.blit(font_body.render(l2, True, TEXT), (lbx + 4, ly + 6))
+                ax = lbx + lbw; ay = ly + 4
+                pygame.draw.line(surf, MID_GRAY, (ax, ay), (mon_x - 3, ay), 1)
+                pygame.draw.polygon(surf, MID_GRAY,
+                                    [(mon_x, ay), (mon_x - 8, ay - 4), (mon_x - 8, ay + 4)])
+            for i, (l1, l2) in enumerate(lbl_right):
+                ly = mon_y + 16 + i * 58
+                lbx = box2.right - 4 - lbw
+                pygame.draw.rect(surf, PANEL_MID, (lbx, ly - 13, lbw, 34), border_radius=5)
+                pygame.draw.rect(surf, BLUE,      (lbx, ly - 13, lbw, 34), 1, border_radius=5)
+                surf.blit(font_body.render(l1, True, TEXT), (lbx + 4, ly - 10))
+                surf.blit(font_body.render(l2, True, TEXT), (lbx + 4, ly + 6))
+                ax = lbx; ay = ly + 4
+                ex = mon_x + mon_w + 3
+                pygame.draw.line(surf, MID_GRAY, (ex, ay), (ax - 3, ay), 1)
+                pygame.draw.polygon(surf, MID_GRAY,
+                                    [(ax, ay), (ax - 8, ay - 4), (ax - 8, ay + 4)])
+
+            # Sub-labels below monitor
+            for i, txt in enumerate(["Hybrid AI ·  Real-time estimation",
+                                      "Predictive control ·  OLR compensation"]):
+                surf.blit(font_body.render(txt, True, MID_GRAY),
+                          font_body.render(txt, True, MID_GRAY)
+                          .get_rect(centerx=box2.centerx, centery=box2.bottom - 36 + i * 18))
+
+            # Fast glowing AI packets
             pipe_len = (box2.bottom + 40 + 78) - box1.bottom
             for p in self.ai_pts:
                 p['p'] = (p['p'] + p['speed']) % 1.0
@@ -611,25 +786,121 @@ class FlowPanel:
                     pygame.draw.circle(surf, (160, 215, 255), (cx, py), 4)
 
             self._pipe(surf, cx, box2.bottom, box2.bottom + 40, MID_GRAY)
-
-            # AI output box
             box3 = pygame.Rect(cx - 170, box2.bottom + 40, 340, 78)
             self._draw_box(surf, box3, "OPTIMISED OUTPUT",
                            [f"T = {out.temperature:.1f} °C       pH = {out.ph:.2f}"],
                            BLUE, font_title, font_body)
 
-        # Right-pointing arrow to gauges
+        # ── Horizontal arrows to/from side panels ─────────────────────────────
         arr_y = box3.centery  # type: ignore[possibly-undefined]
         ax0 = box3.right; ax1 = RIGHT_X - 4
         pygame.draw.line(surf, MID_GRAY, (ax0, arr_y), (ax1 - 12, arr_y), 2)
         pygame.draw.polygon(surf, MID_GRAY,
                             [(ax1, arr_y), (ax1 - 12, arr_y - 7), (ax1 - 12, arr_y + 7)])
 
-        # Left-pointing arrow from reactor
         lax0 = LEFT_W + 4; lax1 = box1.left
         pygame.draw.line(surf, MID_GRAY, (lax0 + 12, arr_y), (lax1, arr_y), 2)
         pygame.draw.polygon(surf, MID_GRAY,
                             [(lax0, arr_y), (lax0 + 12, arr_y - 7), (lax0 + 12, arr_y + 7)])
+
+
+# ── Biogas time-series chart ──────────────────────────────────────────────────
+class BiogasChart:
+    """Rolling line chart for biogas flow rate linked to reactor health."""
+    HISTORY    = 300          # frames of rolling history (~5 s at 60 fps)
+    FLOW_MIN   = 0.0
+    FLOW_MAX   = 10.0
+    THRESH_LO  = 3.5          # green band
+    THRESH_HI  = 6.5
+    WARN_LO    = 2.0          # amber band
+    WARN_HI    = 8.0
+
+    def __init__(self, x: int, y: int, w: int, h: int):
+        self.rect = pygame.Rect(x, y, w, h)
+        self._history: collections.deque = collections.deque(
+            [5.0] * self.HISTORY, maxlen=self.HISTORY)
+        self._current = 5.0
+
+    def update(self, value: float) -> None:
+        self._current = value
+        self._history.append(value)
+
+    def draw(self, surf: pygame.Surface, font_lbl: pygame.font.Font,
+             font_val: pygame.font.Font) -> None:
+        rx, ry, rw, rh = self.rect.x, self.rect.y, self.rect.w, self.rect.h
+        PAD_L, PAD_R, PAD_T, PAD_B = 38, 10, 26, 24
+
+        # Background
+        pygame.draw.rect(surf, PANEL_MID, self.rect, border_radius=10)
+        pygame.draw.rect(surf, DARK_GRAY, self.rect, 1, border_radius=10)
+
+        # Plot area
+        px, py = rx + PAD_L, ry + PAD_T
+        pw, ph = rw - PAD_L - PAD_R, rh - PAD_T - PAD_B
+
+        def vy(v: float) -> int:
+            return py + ph - int((v - self.FLOW_MIN) / (self.FLOW_MAX - self.FLOW_MIN) * ph)
+
+        def vx(i: int) -> int:
+            return px + int(i / (self.HISTORY - 1) * pw)
+
+        # Green threshold band (filled)
+        t_hi_y, t_lo_y = vy(self.THRESH_HI), vy(self.THRESH_LO)
+        band = pygame.Surface((pw, t_lo_y - t_hi_y), pygame.SRCALPHA)
+        band.fill((0, 170, 65, 55))
+        surf.blit(band, (px, t_hi_y))
+
+        # Threshold lines
+        pygame.draw.line(surf, GREEN, (px, t_hi_y), (px + pw, t_hi_y), 1)
+        pygame.draw.line(surf, GREEN, (px, t_lo_y), (px + pw, t_lo_y), 1)
+
+        # Warn lines (dashed via segments)
+        for sy in (vy(self.WARN_LO), vy(self.WARN_HI)):
+            for sx in range(px, px + pw, 10):
+                pygame.draw.line(surf, AMBER, (sx, sy), (min(sx + 6, px + pw), sy), 1)
+
+        # Axes
+        pygame.draw.line(surf, MID_GRAY, (px, py), (px, py + ph), 2)           # Y
+        pygame.draw.line(surf, MID_GRAY, (px, py + ph), (px + pw, py + ph), 2) # X
+
+        # Y-axis ticks + labels
+        for v in (0, 2, 4, 6, 8, 10):
+            ty = vy(v)
+            pygame.draw.line(surf, MID_GRAY, (px - 4, ty), (px, ty), 1)
+            lbl = font_lbl.render(str(v), True, MID_GRAY)
+            surf.blit(lbl, lbl.get_rect(right=px - 5, centery=ty))
+
+        # X-axis label
+        xl = font_lbl.render("Time \u2192", True, MID_GRAY)
+        surf.blit(xl, xl.get_rect(right=px + pw, top=py + ph + 3))
+
+        # Y-axis unit
+        ul = font_lbl.render("m\u00b3/d", True, MID_GRAY)
+        surf.blit(ul, (rx + 2, py))
+
+        # Data line — colour-coded by zone
+        pts = list(self._history)
+        prev = None
+        for i, v in enumerate(pts):
+            pt = (vx(i), vy(v))
+            if prev:
+                if self.THRESH_LO <= v <= self.THRESH_HI:  col = GREEN
+                elif self.WARN_LO  <= v <= self.WARN_HI:   col = AMBER
+                else:                                       col = RED
+                pygame.draw.line(surf, col, prev, pt, 2)
+            prev = pt
+
+        # Live value + title
+        cv = self._current
+        if self.THRESH_LO <= cv <= self.THRESH_HI:   vc = GREEN
+        elif self.WARN_LO  <= cv <= self.WARN_HI:    vc = AMBER
+        else:                                         vc = RED
+
+        title = font_lbl.render("BIOGAS FLOW RATE", True, TEXT)
+        surf.blit(title, title.get_rect(centerx=rx + rw // 2, centery=ry + PAD_T // 2 + 4))
+
+        vt = font_val.render(f"{cv:.1f} m\u00b3/day", True, vc)
+        surf.blit(vt, vt.get_rect(right=rx + rw - 4, centery=ry + PAD_T // 2 + 4))
 
 
 # ── Main dashboard ────────────────────────────────────────────────────────────
@@ -655,6 +926,10 @@ class Dashboard:
         self.ph_gauge   = ArcGauge(PH_GX,   GAUGE_GY, GAUGE_R,
                                    PH_MIN,   PH_MAX,   PH_SAFE_LO,   PH_SAFE_HI,
                                    PH_WARN_LO,   PH_WARN_HI,   "pH LEVEL",    "pH")
+        # Biogas time-series chart (below the two arc gauges)
+        self.biogas_chart = BiogasChart(BIOGAS_CHART_X, BIOGAS_CHART_Y,
+                                        BIOGAS_CHART_W, BIOGAS_CHART_H)
+        self._biogas_flow = 5.0   # smoothed internal value
 
         # Fallback controls
         self.mode_switch = ToggleSwitch(SCREEN_W//2, SCREEN_H - 26)
@@ -705,6 +980,10 @@ class Dashboard:
         self.reactor.update(self.ad_state)
         self.temp_gauge.update(self.ad_state.temperature)
         self.ph_gauge.update(self.ad_state.ph)
+        # Biogas flow tracks reactor health: max 8 m³/day; stays in green when T+pH are healthy
+        target_flow = self.reactor.health * 8.0 + random.gauss(0, 0.04)
+        self._biogas_flow += (target_flow - self._biogas_flow) * 0.04
+        self.biogas_chart.update(self._biogas_flow)
         self.warn_tick = (self.warn_tick + 1) % FPS
 
     def _stable(self):
@@ -759,6 +1038,7 @@ class Dashboard:
         # ── Gauges (right panel) ───────────────────────────────────────────────
         self.temp_gauge.draw(self.screen, self.font_lg, self.font_md)
         self.ph_gauge.draw(self.screen,   self.font_lg, self.font_md)
+        self.biogas_chart.draw(self.screen, self.font_sm, self.font_md)
 
         # ── Warnings ──────────────────────────────────────────────────────────
         flash = self.warn_tick < FPS // 2
