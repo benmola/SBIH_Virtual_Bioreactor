@@ -42,16 +42,17 @@ DELAY_SECONDS = 2.5
 DELAY_SAMPLES = int(DELAY_SECONDS * SAMPLE_HZ)
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-BLACK      = (10,  10,  20)
-WHITE      = (240, 240, 240)
-GREEN      = (0,   200, 80)
-RED        = (220, 40,  40)
-AMBER      = (255, 160, 0)
-BLUE       = (30,  120, 255)
-DARK_GRAY  = (40,  40,  55)
-MID_GRAY   = (80,  80,  100)
-PANEL_BG   = (18,  20,  32)
-PANEL_MID  = (24,  26,  42)
+BLACK      = (255, 255, 255)   # window fill — white
+WHITE      = (255, 255, 255)   # kept for compatibility
+TEXT       = (18,  24,  52)    # dark navy for all body text
+GREEN      = (0,   170, 65)
+RED        = (210, 35,  35)
+AMBER      = (230, 140, 0)
+BLUE       = (25,  100, 230)
+DARK_GRAY  = (170, 174, 195)
+MID_GRAY   = (100, 108, 145)
+PANEL_BG   = (232, 236, 248)   # light blue-grey panels
+PANEL_MID  = (210, 216, 238)   # slightly darker for flow boxes
 
 # ── AD parameter ranges ───────────────────────────────────────────────────────
 PH_MIN,   PH_MAX   = 4.0,  9.0
@@ -179,12 +180,23 @@ class ReactorViz:
         if wlo <= v <= whi:   return 0.5   # warning
         return 0.0                          # danger
 
+    def _health_score(self, v, slo, shi, wlo, whi):
+        """Continuous score: 1.0 in safe zone, ≤0.5 anywhere in amber warning zone, 0 at danger."""
+        if slo <= v <= shi:
+            return 1.0
+        if v < slo:
+            if v <= wlo: return 0.0
+            return 0.5 * (v - wlo) / (slo - wlo)   # warn zone: 0 → 0.5
+        # v > shi
+        if v >= whi: return 0.0
+        return 0.5 * (whi - v) / (whi - shi)        # warn zone: 0.5 → 0
+
     def update(self, state: ADState):
-        ph_h   = self._zone_color_for(state.ph,          PH_SAFE_LO,   PH_SAFE_HI,   PH_WARN_LO,   PH_WARN_HI)
-        temp_h = self._zone_color_for(state.temperature, TEMP_SAFE_LO, TEMP_SAFE_HI, TEMP_WARN_LO, TEMP_WARN_HI)
-        # pH crash kills the culture far faster than a temperature drift — weight accordingly
-        h = ph_h * 0.70 + temp_h * 0.30
-        self.health += (h - self.health) * 0.015
+        ph_h   = self._health_score(state.ph,          PH_SAFE_LO,   PH_SAFE_HI,   PH_WARN_LO,   PH_WARN_HI)
+        temp_h = self._health_score(state.temperature, TEMP_SAFE_LO, TEMP_SAFE_HI, TEMP_WARN_LO, TEMP_WARN_HI)
+        # Multiplicative — both pH and temperature must be healthy; neither can compensate for the other
+        h = ph_h * temp_h
+        self.health += (h - self.health) * 0.06
 
         spd = self.health * 0.005
         for b in self.bact:
@@ -219,7 +231,7 @@ class ReactorViz:
         liq = (int(70 + t * 120), int(60 + t * 100), int(20 + t * 30))
 
         # Vessel body
-        pygame.draw.rect(surf, (38, 42, 62),
+        pygame.draw.rect(surf, (58, 65, 102),
                          (cx - w//2, cy - h//2, w, h), border_radius=22)
         # Liquid fill
         pygame.draw.rect(surf, liq,
@@ -231,7 +243,7 @@ class ReactorViz:
             by = int(self.ly + bbl[1] * self.lh)
             r  = bbl[2]
             bs = pygame.Surface((r*2+2, r*2+2), pygame.SRCALPHA)
-            pygame.draw.circle(bs, (200, 230, 255, 100), (r+1, r+1), r)
+            pygame.draw.circle(bs, (200, 230, 255, 150), (r+1, r+1), r)
             surf.blit(bs, (bx - r, by - r))
 
         # Bacteria
@@ -252,20 +264,49 @@ class ReactorViz:
                 pygame.draw.circle(surf, (220, 220, 200),
                                    (fx, self.ly + random.randint(2, 12)), random.randint(4, 10))
 
-        # Vessel outline + pipes
-        pygame.draw.rect(surf, (90, 100, 130),
+        # Vessel outline
+        pygame.draw.rect(surf, (150, 165, 210),
                          (cx - w//2, cy - h//2, w, h), 3, border_radius=22)
-        # Gas outlet top
-        pygame.draw.rect(surf, (70, 78, 108), (cx - 12, cy - h//2 - 24, 24, 28), border_radius=4)
-        # Inlet left
-        pygame.draw.rect(surf, (70, 78, 108), (cx - w//2 - 28, cy - h//2 + 22, 30, 16), border_radius=4)
-        # Outlet right
-        pygame.draw.rect(surf, (70, 78, 108), (cx + w//2 - 2, cy - h//2 + 22, 30, 16), border_radius=4)
 
-        # Label
-        surf.blit(font_lbl.render("PHYSICAL REACTOR", True, WHITE),
-                  font_lbl.render("PHYSICAL REACTOR", True, WHITE)
-                  .get_rect(centerx=cx, centery=cy - h//2 - 52))
+        pipe_col = (115, 128, 175)
+
+        # Gas riser pipe (vessel top → biogas bag)
+        pygame.draw.rect(surf, pipe_col,
+                         (cx - 10, cy - h//2 - 46, 20, 47), border_radius=4)
+
+        # Biogas bag — gently inflates when reactor is active
+        _tms   = pygame.time.get_ticks()
+        _pulse = int(math.sin(_tms * 0.002) * 5) if self.health > 0.3 else 0
+        bag_w  = 88 + _pulse
+        bag_h  = 48 + max(0, _pulse // 2)
+        bag_cy = cy - h//2 - 70
+        bag_fill = (45, 185, 110) if self.health > 0.5 else (170, 125, 35)
+        pygame.draw.ellipse(surf, bag_fill,
+                            (cx - bag_w//2, bag_cy - bag_h//2, bag_w, bag_h))
+        pygame.draw.ellipse(surf, (200, 235, 215),
+                            (cx - bag_w//2, bag_cy - bag_h//2, bag_w, bag_h), 2)
+        surf.blit(font_lbl.render("BIOGAS", True, TEXT),
+                  font_lbl.render("BIOGAS", True, TEXT)
+                  .get_rect(centerx=cx, centery=bag_cy))
+
+        # Inlet pipe (left — lower third, substrate in)
+        pygame.draw.rect(surf, pipe_col,
+                         (cx - w//2 - 28, cy + h//4 - 8, 30, 16), border_radius=4)
+        surf.blit(font_lbl.render("INLET", True, pipe_col),
+                  font_lbl.render("INLET", True, pipe_col)
+                  .get_rect(right=cx - w//2 - 33, centery=cy + h//4))
+
+        # Outlet pipe (right — upper third, effluent out)
+        pygame.draw.rect(surf, pipe_col,
+                         (cx + w//2 - 2, cy - h//4 - 8, 30, 16), border_radius=4)
+        surf.blit(font_lbl.render("OUTLET", True, pipe_col),
+                  font_lbl.render("OUTLET", True, pipe_col)
+                  .get_rect(left=cx + w//2 + 33, centery=cy - h//4))
+
+        # Panel label — above the biogas bag
+        surf.blit(font_lbl.render("PHYSICAL AD REACTOR", True, TEXT),
+                  font_lbl.render("PHYSICAL AD REACTOR", True, TEXT)
+                  .get_rect(centerx=cx, centery=MAIN_TOP + 16))
 
         # Health bar
         bw = w - 10
@@ -275,8 +316,8 @@ class ReactorViz:
         if self.health > 0:
             hc = (int(220*(1-self.health)), int(190*self.health), 30)
             pygame.draw.rect(surf, hc, (bx, by, int(bw*self.health), 10), border_radius=5)
-        surf.blit(font_lbl.render(f"Reactor Health  {int(self.health*100)} %", True, MID_GRAY),
-                  font_lbl.render(f"Reactor Health  {int(self.health*100)} %", True, MID_GRAY)
+        surf.blit(font_lbl.render(f"Reactor Health  {int(self.health*100)} %", True, TEXT),
+                  font_lbl.render(f"Reactor Health  {int(self.health*100)} %", True, TEXT)
                   .get_rect(centerx=cx, centery=by + 20))
 
 
@@ -315,7 +356,7 @@ class ArcGauge:
             t = i / STEPS
             a = self.ARC_START + t * self.ARC_SPAN
             v = self.val_min + t * (self.val_max - self.val_min)
-            col = tuple(c // 4 for c in self._color(v))
+            col = tuple(c // 3 for c in self._color(v))
             pt = (int(cx + r * math.cos(a)), int(cy + r * math.sin(a)))
             if prev_pt:
                 pygame.draw.line(surf, col, prev_pt, pt, THICK)
@@ -367,8 +408,8 @@ class ArcGauge:
         surf.blit(font_lbl.render(self.unit, True, MID_GRAY),
                   font_lbl.render(self.unit, True, MID_GRAY)
                   .get_rect(centerx=cx, centery=cy + r // 3 + 40))
-        surf.blit(font_lbl.render(self.label, True, WHITE),
-                  font_lbl.render(self.label, True, WHITE)
+        surf.blit(font_lbl.render(self.label, True, TEXT),
+                  font_lbl.render(self.label, True, TEXT)
                   .get_rect(centerx=cx, centery=cy - r - 24))
 
 
@@ -391,8 +432,8 @@ class Slider:
     def draw(self, surf, font):
         pygame.draw.rect(surf, MID_GRAY, self.track, border_radius=8)
         hx = int(self.track.x + (self.value - self.lo) / (self.hi - self.lo) * self.track.w)
-        pygame.draw.circle(surf, WHITE, (hx, self.track.centery), 14)
-        surf.blit(font.render(f"{self.label}: {self.value:.2f}", True, WHITE),
+        pygame.draw.circle(surf, (200, 200, 215), (hx, self.track.centery), 14)
+        surf.blit(font.render(f"{self.label}: {self.value:.2f}", True, TEXT),
                   (self.track.x, self.track.y - 26))
 
 
@@ -471,14 +512,14 @@ class FlowPanel:
                   font_t.render(title, True, color).get_rect(centerx=rect.centerx,
                                                              centery=rect.y + 20))
         for i, ln in enumerate(lines):
-            surf.blit(font_b.render(ln, True, MID_GRAY),
-                      font_b.render(ln, True, MID_GRAY).get_rect(centerx=rect.centerx,
+            surf.blit(font_b.render(ln, True, TEXT),
+                      font_b.render(ln, True, TEXT).get_rect(centerx=rect.centerx,
                                                                   centery=rect.y + 44 + i * 22))
 
     def _pipe(self, surf, x, y0, y1, color):
         """Styled vertical pipe connector with arrowhead."""
         pw = 5
-        pygame.draw.rect(surf, (22, 25, 40), (x - pw, y0, pw * 2, y1 - y0 - 12))
+        pygame.draw.rect(surf, (42, 48, 75), (x - pw, y0, pw * 2, y1 - y0 - 12))
         pygame.draw.line(surf, MID_GRAY, (x - pw, y0), (x - pw, y1 - 12), 1)
         pygame.draw.line(surf, MID_GRAY, (x + pw, y0), (x + pw, y1 - 12), 1)
         pygame.draw.polygon(surf, color, [(x, y1), (x - 9, y1 - 15), (x + 9, y1 - 15)])
@@ -546,7 +587,7 @@ class FlowPanel:
 
             # Mini virtual reactor inside the DT box
             mr = pygame.Rect(box2.centerx - 42, box2.y + 130, 84, 100)
-            pygame.draw.rect(surf, (30, 34, 54), mr, border_radius=10)
+            pygame.draw.rect(surf, (52, 58, 92), mr, border_radius=10)
             # Mini liquid (always stable green in DT)
             ml = pygame.Rect(mr.x + 4, mr.y + 4, mr.w - 8, mr.h - 8)
             pygame.draw.rect(surf, (80, 160, 80), ml, border_radius=7)
@@ -556,8 +597,8 @@ class FlowPanel:
                 by = int(ml.y + ml.h * (0.3 + 0.6 * ((tick * 0.03 + i * 0.7) % 1.0)))
                 pygame.draw.circle(surf, (180, 220, 255), (bx, by), 3)
             pygame.draw.rect(surf, (80, 100, 160), mr, 2, border_radius=10)
-            surf.blit(font_body.render("Virtual Reactor", True, MID_GRAY),
-                      font_body.render("Virtual Reactor", True, MID_GRAY)
+            surf.blit(font_body.render("Virtual AD Reactor", True, TEXT),
+                      font_body.render("Virtual AD Reactor", True, TEXT)
                       .get_rect(centerx=box2.centerx, centery=mr.bottom + 10))
 
             # Fast glowing AI packets flowing smoothly through the pipe
@@ -619,7 +660,7 @@ class Dashboard:
                                    PH_WARN_LO,   PH_WARN_HI,   "pH LEVEL",    "pH")
 
         # Fallback controls
-        self.mode_switch = ToggleSwitch(SCREEN_W//2, SCREEN_H - 56)
+        self.mode_switch = ToggleSwitch(SCREEN_W//2, SCREEN_H - 26)
         self.temp_slider = Slider(TEMP_GX - 100, SLIDER_Y, 200, TEMP_MIN, TEMP_MAX, "Temp °C")
         self.ph_slider   = Slider(PH_GX   - 100, SLIDER_Y, 200, PH_MIN,   PH_MAX,   "pH")
         self.temp_slider.value = 37.5; self.ph_slider.value = 7.0
@@ -692,8 +733,8 @@ class Dashboard:
         # ── Header ────────────────────────────────────────────────────────────
         pygame.draw.rect(self.screen, PANEL_BG, (0, 0, SCREEN_W, HEADER_H))
         self.screen.blit(
-            self.font_lg.render("AD REACTOR CONTROL CHALLENGE — DIGITAL TWIN", True, WHITE),
-            self.font_lg.render("AD REACTOR CONTROL CHALLENGE — DIGITAL TWIN", True, WHITE)
+            self.font_lg.render("AD REACTOR CONTROL CHALLENGE — DIGITAL TWIN", True, TEXT),
+            self.font_lg.render("AD REACTOR CONTROL CHALLENGE — DIGITAL TWIN", True, TEXT)
             .get_rect(centerx=SCREEN_W//2, centery=HEADER_H//2))
 
         # ── Mode banner ───────────────────────────────────────────────────────
@@ -702,8 +743,8 @@ class Dashboard:
         else:
             bc, bt = RED, "MANUAL MODE — Direct Control (High Latency, No AI)"
         pygame.draw.rect(self.screen, bc, (0, HEADER_H, SCREEN_W, BANNER_H))
-        self.screen.blit(self.font_md.render(bt, True, WHITE),
-                         self.font_md.render(bt, True, WHITE)
+        self.screen.blit(self.font_md.render(bt, True, (240, 242, 255)),
+                         self.font_md.render(bt, True, (240, 242, 255))
                          .get_rect(centerx=SCREEN_W//2, centery=HEADER_H + BANNER_H//2))
 
         # ── Right panel title ─────────────────────────────────────────────────
@@ -711,7 +752,6 @@ class Dashboard:
         self.screen.blit(self.font_sm.render(label, True, BLUE if self.ai_mode else RED),
                          self.font_sm.render(label, True, BLUE if self.ai_mode else RED)
                          .get_rect(centerx=(RIGHT_X + SCREEN_W)//2, centery=MAIN_TOP + 16))
-
         # ── Reactor (left panel) ───────────────────────────────────────────────
         self.reactor.draw(self.screen, self.font_sm, self.font_lg)
 
@@ -725,7 +765,7 @@ class Dashboard:
 
         # ── Warnings ──────────────────────────────────────────────────────────
         flash = self.warn_tick < FPS // 2
-        warn_y = MAIN_BOT + 10
+        warn_y = MAIN_BOT - 18
         if self._critical() and flash:
             msgs = []
             if self.ad_state.ph < PH_WARN_LO:       msgs.append("SYSTEM SOURING — BACTERIA DYING")
