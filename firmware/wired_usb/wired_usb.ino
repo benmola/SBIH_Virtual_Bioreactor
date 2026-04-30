@@ -1,7 +1,7 @@
 /*
  * AD Reactor Wand — Wired USB (single-board setup)
  * Board : Nice!Nano v2 (nRF52840, Pro Micro footprint)
- * IMU   : MPU-6500 via I2C (GY-6500 module)
+ * IMU   : MPU-6050 via I2C
  * Data  : USB Serial at 115200 baud → Python dashboard
  *
  * ── Library (install via Arduino IDE Library Manager) ────────────────────────
@@ -27,14 +27,14 @@
  *   D18             P1.15           3                  LED1 on Feather; GPIO here
  *   D1              P0.06           11                 Switch
  *
- * ── GY-6500 → Nice!Nano v2 wiring ────────────────────────────────────────────
- *   GY-6500 pin    Nice!Nano pad    Notes
+ * ── MPU-6050 → Nice!Nano v2 wiring ───────────────────────────────────────────
+ *   MPU-6050 pin   Nice!Nano pad    Notes
  *   VCC            3V3              —
  *   GND            GND              —
  *   SDA            D16              I2C SDA  (P0.10, Feather index 2)
  *   SCL            D18              I2C SCL  (P1.15, Feather index 3)
- *   AD0/SDO        GND              Pulls I2C address to 0x68
- *   INT, FSYNC     —                not connected
+ *   AD0            GND              Pulls I2C address to 0x68
+ *   INT, XCL, XDA  —                not connected
  *
  * ── Switch wiring ────────────────────────────────────────────────────────────
  *   Switch leg 1   D1               P0.06 (Feather index 11)
@@ -60,11 +60,11 @@
 //   Feather 11 = P0.06 = Nice!Nano D1
 #define SWITCH_PIN 11
 
-// ── MPU-6500 I2C address (AD0/SDO tied to GND) ───────────────────────────────
-#define MPU6500_ADDR  0x68
+// ── MPU-6050 I2C address (AD0 tied to GND) ───────────────────────────────────
+#define MPU6050_ADDR  0x68
 
-// ── FastIMU objects (MPU6500 constructor defaults to global Wire) ─────────────
-MPU6500   IMU;
+// ── FastIMU objects ───────────────────────────────────────────────────────────
+MPU6050   IMU;
 calData   calibrationData;
 AccelData accel;
 GyroData  gyro;
@@ -82,7 +82,7 @@ void setup() {
   unsigned long t = millis();
   while (!Serial && millis() - t < 5000);
 
-  Serial.println("=== AD Wand — Wired USB (MPU-6500 I2C / FastIMU) ===");
+  Serial.println("=== AD Wand — Wired USB (MPU-6050 I2C / FastIMU) ===");
 
   pinMode(SWITCH_PIN, INPUT_PULLUP);
 
@@ -90,11 +90,11 @@ void setup() {
   Wire.setPins(PIN_SDA, PIN_SCL);
   Wire.begin();
 
-  int err = IMU.init(calibrationData, MPU6500_ADDR);
+  int err = IMU.init(calibrationData, MPU6050_ADDR);
   if (err != 0) {
-    Serial.print("MPU-6500 init error: ");
+    Serial.print("MPU-6050 init error: ");
     Serial.println(err);
-    Serial.println("Check: SDA->D2, SCL->D3, AD0->GND, VCC->3V3");
+    Serial.println("Check: SDA->D16, SCL->D18, AD0->GND, VCC->3V3");
     while (true) delay(100);
   }
 
@@ -103,7 +103,7 @@ void setup() {
   delay(1000);
   IMU.calibrateAccelGyro(&calibrationData);
 
-  Serial.println("MPU-6500 OK — streaming at 20 Hz over USB...");
+  Serial.println("MPU-6050 OK — streaming at 20 Hz over USB...");
   lastMs = millis();
 }
 
