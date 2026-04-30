@@ -68,7 +68,17 @@ TEMP_MIN, TEMP_MAX = 25.0, 50.0
 TEMP_SAFE_LO, TEMP_SAFE_HI = 35.0, 40.0
 TEMP_WARN_LO, TEMP_WARN_HI = 33.0, 42.0
 
-OLR_YAW_THRESHOLD = 15.0
+OLR_YAW_THRESHOLD = 15.0  # kept for reference but unused
+
+# ── IMU orientation calibration ──────────────────────────────────────────────────────
+# pitch → Temperature   |   roll → pH   |   yaw → not used
+# Roll is accelerometer-based (no drift); responds directly to side-tilt of the bottle.
+# Sensor glued vertically to the bottom of the bottle → roll ≈ 0° when bottle stands upright (optimal).
+# Sign is negated in the mapping so tilting right raises pH, tilting left lowers it.
+PITCH_CENTER =   0.0
+PITCH_RANGE  =  60.0   # ±degrees for full temperature swing
+ROLL_CENTER  =   0.0   # degrees — resting roll when bottle stands upright (vertical mounting)
+ROLL_RANGE   =  60.0   # ±degrees of side-tilt for full pH swing
 
 
 def _imu_map(v: float, in_lo: float, in_hi: float, out_lo: float, out_hi: float) -> float:
@@ -85,7 +95,7 @@ class IMUPacket:
 class ADState:
     temperature:     float = 37.5
     ph:              float = 7.0
-    olr_disturbance: float = 0.0
+    olr_disturbance: float = 0.0   # kept for compatibility; always 0 now
 
 
 # ── Serial reader ─────────────────────────────────────────────────────────────
@@ -116,70 +126,92 @@ class SerialReader(threading.Thread):
     def stop(self): self.running = False
 
 
-# ── Data processor ────────────────────────────────────────────────────────────
+# ── Data processor ───────────────────────────────────────────────────────────────────
 class DataProcessor:
     def __init__(self):
-        self._delay_buf = collections.deque(maxlen=DELAY_SAMPLES)
-        self._prev_temp = 37.5; self._prev_ph = 7.0
-        self._smooth_temp = 37.5; self._smooth_ph = 7.0
-        self._prev_yaw = 0.0; self._olr = 0.0
+        self._delay_buf   = collections.deque(maxlen=DELAY_SAMPLES)
+        self._prev_temp   = 37.5; self._prev_ph    = 7.0
+        self._smooth_temp = 37.5; self._smooth_ph  = 7.0
+        self._osc_t = 0.0; self._osc_p = 0.0
 
-    def _imu_to_raw(self, pkt: IMUPacket) -> Tuple[float, float]:
-        return (_imu_map(pkt.pitch, -90.0, 90.0, TEMP_MIN, TEMP_MAX),
-                _imu_map(pkt.roll,  -90.0, 90.0, PH_MIN,   PH_MAX))
+    def process_manual(self, raw_temp: float, raw_ph: float,
+                       pkt: Optional[IMUPacket] = None) -> ADState:
+        # Heavy sensor noise — makes the reading jump around wildly
+        raw_temp += random.gauss(0, 3.5)
+        raw_ph   += random.gauss(0, 0.55)
 
-    def _olr_disturbance(self, pkt, temp, ph):
-        yd = abs(pkt.yaw - self._prev_yaw); self._prev_yaw = pkt.yaw
-        if yd > OLR_YAW_THRESHOLD: self._olr = min(self._olr + yd * 0.06, 4.0)
-        self._olr *= 0.92
-        d = self._olr * (random.random() * 2 - 1)
-        return temp + d * 2.0, ph + d * 0.4, self._olr
+        # Occasional large random spikes (20 % chance per frame each)
+        if random.random() < 0.20:
+            raw_temp += random.choice([-1, 1]) * random.uniform(2.0, 6.0)
+        if random.random() < 0.20:
+            raw_ph   += random.choice([-1, 1]) * random.uniform(0.4, 1.2)
 
-    def process_manual(self, pkt) -> ADState:
-        t, p = self._imu_to_raw(pkt)
-        t, p, olr = self._olr_disturbance(pkt, t, p)
-        self._delay_buf.append((t, p))
-        dt, dp = self._delay_buf[0] if len(self._delay_buf) >= DELAY_SAMPLES else (t, p)
-        dt += random.gauss(0, 0.35); dp += random.gauss(0, 0.06)
-        ot = 0.85 * self._prev_temp + 0.15 * dt
-        op = 0.85 * self._prev_ph   + 0.15 * dp
+        # Dead-time delay buffer
+        self._delay_buf.append((raw_temp, raw_ph))
+        dt, dp = self._delay_buf[0] if len(self._delay_buf) >= DELAY_SAMPLES else (raw_temp, raw_ph)
+
+        err_t = dt - self._prev_temp
+        err_p = dp - self._prev_ph
+
+        # High-inertia oscillator — strong overshoot, slow correction
+        self._osc_t = 0.82 * self._osc_t + 0.18 * err_t
+        self._osc_p = 0.82 * self._osc_p + 0.18 * err_p
+
+        # Very sluggish response (2 % of error per frame) + strong oscillation + output noise
+        ot = self._prev_temp + 0.02 * err_t + 0.65 * self._osc_t + random.gauss(0, 1.2)
+        op = self._prev_ph   + 0.02 * err_p + 0.65 * self._osc_p + random.gauss(0, 0.18)
+
+        ot = max(TEMP_MIN, min(TEMP_MAX, ot))
+        op = max(PH_MIN,   min(PH_MAX,   op))
         self._prev_temp = ot; self._prev_ph = op
-        return ADState(ot, op, olr)
+        return ADState(ot, op, 0.0)
 
-    def process_ai(self, pkt) -> ADState:
-        t, p = self._imu_to_raw(pkt)
-        t, p, olr = self._olr_disturbance(pkt, t, p)
-        a = 0.15
-        self._smooth_temp = a * t + (1 - a) * self._smooth_temp
-        self._smooth_ph   = a * p + (1 - a) * self._smooth_ph
-        if self._smooth_ph   < PH_SAFE_LO   - 0.25: self._smooth_ph   += 0.05
-        if self._smooth_ph   > PH_SAFE_HI   + 0.25: self._smooth_ph   -= 0.05
-        if self._smooth_temp < TEMP_SAFE_LO - 1.0:  self._smooth_temp += 0.10
-        if self._smooth_temp > TEMP_SAFE_HI + 1.0:  self._smooth_temp -= 0.10
-        return ADState(self._smooth_temp, self._smooth_ph, olr)
-
+    def process_ai(self, raw_temp: float, raw_ph: float,
+                   pkt: Optional[IMUPacket] = None) -> ADState:
+        raw_temp += random.gauss(0, 0.06)
+        raw_ph   += random.gauss(0, 0.009)
+        a = 0.25
+        self._smooth_temp = a * raw_temp + (1 - a) * self._smooth_temp
+        self._smooth_ph   = a * raw_ph   + (1 - a) * self._smooth_ph
+        temp_c = (TEMP_SAFE_LO + TEMP_SAFE_HI) / 2
+        ph_c   = (PH_SAFE_LO   + PH_SAFE_HI)   / 2
+        if   self._smooth_temp < TEMP_SAFE_LO:
+            self._smooth_temp += min(0.5, (TEMP_SAFE_LO - self._smooth_temp) * 0.45)
+        elif self._smooth_temp > TEMP_SAFE_HI:
+            self._smooth_temp -= min(0.5, (self._smooth_temp - TEMP_SAFE_HI) * 0.45)
+        else:
+            self._smooth_temp += (temp_c - self._smooth_temp) * 0.08
+        if   self._smooth_ph < PH_SAFE_LO:
+            self._smooth_ph += min(0.07, (PH_SAFE_LO - self._smooth_ph) * 0.45)
+        elif self._smooth_ph > PH_SAFE_HI:
+            self._smooth_ph -= min(0.07, (self._smooth_ph - PH_SAFE_HI) * 0.45)
+        else:
+            self._smooth_ph += (ph_c - self._smooth_ph) * 0.08
+        return ADState(
+            max(TEMP_MIN, min(TEMP_MAX, self._smooth_temp)),
+            max(PH_MIN,   min(PH_MAX,   self._smooth_ph)),
+            0.0)
 
 # ── Feedstock icon helper ─────────────────────────────────────────────────────
-def _draw_feedstock_icons(surf: pygame.Surface, panel_cx: int, bottom_y: int,
+def _draw_feedstock_icons(surf: pygame.Surface, ix: int, center_y: int,
                           font: pygame.font.Font):
-    """Draw maize silage, food waste, cattle slurry horizontally at bottom of reactor panel."""
+    """Draw maize silage, food waste, cattle slurry as a vertical column on the left."""
     feedstocks = [
         ("Maize Silage",  (240, 190,  40), (80, 160,  60), "corn"),
         ("Food Waste",    (220,  80,  50), (60, 140,  40), "apple"),
         ("Cattle Slurry", (160, 110,  50), (90,  65,  30), "cow"),
     ]
-    spacing = 128
-    r = 18
+    spacing = 90
+    r = 15
     n = len(feedstocks)
-    start_x = panel_cx - (n - 1) * spacing // 2
-    iy = bottom_y - 52   # icon center y
+    start_y = center_y - (n - 1) * spacing // 2
 
-    # Section title
+    # Section title above first icon
     title = font.render("FEEDSTOCKS", True, MID_GRAY)
-    surf.blit(title, title.get_rect(centerx=panel_cx, centery=iy - r - 14))
+    surf.blit(title, title.get_rect(centerx=ix, centery=start_y - r - 18))
 
     for i, (label, body, detail, shape) in enumerate(feedstocks):
-        ix = start_x + i * spacing
+        iy = start_y + i * spacing
 
         if shape == "corn":
             pygame.draw.ellipse(surf, body,   (ix - 8, iy - r,     16, r * 2))
@@ -202,8 +234,8 @@ def _draw_feedstock_icons(surf: pygame.Surface, panel_cx: int, bottom_y: int,
             pygame.draw.ellipse(surf, (200, 150, 100), (ix + r + 3, iy - 11, 6, 8))
             pygame.draw.ellipse(surf, detail, (ix - 8, iy - 5, 10, 6))
             pygame.draw.ellipse(surf, detail, (ix + 2, iy + 1, 7, 5))
-            for lx in (ix - 10, ix - 3, ix + 4, ix + 11):
-                pygame.draw.line(surf, (120, 80, 30), (lx, iy + 9), (lx, iy + 17), 2)
+            for leg_x in (ix - 10, ix - 3, ix + 4, ix + 11):
+                pygame.draw.line(surf, (120, 80, 30), (leg_x, iy + 9), (leg_x, iy + 17), 2)
 
         # Label below icon
         lbl = font.render(label, True, TEXT)
@@ -215,7 +247,7 @@ class ReactorViz:
     N_BACT = 16
     N_BUBB = 14
 
-    def __init__(self, cx, cy, w, h):
+    def __init__(self, cx: int, cy: int, w: int, h: int):
         self.cx, self.cy, self.w, self.h = cx, cy, w, h
         self.lx = cx - w // 2 + 10
         self.ly = cy - h // 2 + 10
@@ -265,16 +297,19 @@ class ReactorViz:
             b[0] = (b[0] + b[2]) % 1.0
             b[1] = (b[1] + b[3]) % 1.0
 
+        # Bubble activity: driven by both temperature and reactor health.
+        # At 0 % health bubbles freeze; at 100 % health they rise at full speed.
         temp_factor = 0.3 + 0.7 * (state.temperature - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
+        health_factor = max(0.0, self.health)  # 0 → stopped, 1 → full speed
         for bbl in self.bubb:
-            bbl[1] -= bbl[3] * temp_factor
-            if bbl[1] < 0:
-                bbl[1] = 1.0
-                bbl[0] = random.uniform(0.1, 0.9)
-                bbl[2] = random.randint(3, 7)
-        if state.olr_disturbance > 1.5:
-            for bbl in random.sample(self.bubb, 3):
-                bbl[1] = 1.0
+            if health_factor < 0.01:
+                pass  # frozen — no movement at all
+            else:
+                bbl[1] -= bbl[3] * temp_factor * health_factor
+                if bbl[1] < 0:
+                    bbl[1] = 1.0
+                    bbl[0] = random.uniform(0.1, 0.9)
+                    bbl[2] = random.randint(3, 7)
 
     def draw(self, surf: pygame.Surface, font_lbl, font_val):
         cx, cy, w, h = self.cx, self.cy, self.w, self.h
@@ -348,8 +383,8 @@ class ReactorViz:
         surf.blit(font_lbl.render("INLET", True, pipe_col),
                   font_lbl.render("INLET", True, pipe_col)
                   .get_rect(right=cx - w//2 - 33, centery=cy + h//4))
-        # ── Feedstock icons at bottom of reactor panel ────────────────────────
-        _draw_feedstock_icons(surf, cx, cy + h//2 + 80, font_lbl)
+        # ── Feedstock icons — vertical column left of reactor vessel ─────────
+        _draw_feedstock_icons(surf, cx - w//2 - 58, cy, font_lbl)
 
         # Outlet pipe (right — upper third, effluent out)
         pygame.draw.rect(surf, pipe_col,
@@ -596,7 +631,7 @@ class FlowPanel:
 
         if not ai_mode:
             # ── MANUAL: Operator illustration ─────────────────────────────────
-            box2 = pygame.Rect(cx - 170, box1.bottom + 40, 340, 210)
+            box2 = pygame.Rect(cx - 170, box1.bottom + 40, 340, 240)
             pygame.draw.rect(surf, PANEL_MID, box2, border_radius=12)
             pygame.draw.rect(surf, RED, box2, 2, border_radius=12)
             surf.blit(font_title.render("OPERATOR CONTROL", True, RED),
@@ -670,7 +705,10 @@ class FlowPanel:
                     p['speed'] = min(0.005, p['speed'] * 1.02)
                 p['p'] = (p['p'] + p['speed']) % 1.0
                 py = int(box1.bottom + p['p'] * pipe_len)
-                in_box = (box1.top < py < box1.bottom) or (box2.top + 2 < py < box2.bottom - 2)
+                box3_top = box2.bottom + 40
+                in_box = ((box1.top < py < box1.bottom)
+                          or (box2.top + 2 < py < box2.bottom - 2)
+                          or (box3_top < py < box3_top + 78))
                 if not in_box:
                     bright = min(255, 160 + int(p['speed'] * 15000))
                     pygame.draw.circle(surf, (bright, 50, 50), (cx, py), 5)
@@ -683,7 +721,7 @@ class FlowPanel:
 
         else:
             # ── AI: Digital Twin Process diagram ──────────────────────────────
-            box2 = pygame.Rect(cx - 180, box1.bottom + 40, 360, 290)
+            box2 = pygame.Rect(cx - 180, box1.bottom + 40, 360, 260)
             pygame.draw.rect(surf, PANEL_MID, box2, border_radius=12)
             bc = tuple(min(255, int(c + pulse * 80)) for c in BLUE)
             pygame.draw.rect(surf, bc, box2, 2, border_radius=12)
@@ -718,7 +756,7 @@ class FlowPanel:
                 pygame.draw.circle(surf, (180, 220, 255), (bx2, by2), 2)
             pygame.draw.rect(surf, (90, 110, 180), lr, 1, border_radius=4)
             ll = font_body.render("VIRTUAL AD", True, (200, 225, 255))
-            surf.blit(ll, ll.get_rect(centerx=lr.centerx, bottom=lr.bottom - 1))
+            surf.blit(ll, ll.get_rect(left=lr.x + 3, bottom=lr.bottom - 2))
 
             # ── Right screen half: Biochemical Network ─────────────────────────
             rr = pygame.Rect(scr.x + scr.w // 2 + 1, scr.y + 2, scr.w // 2 - 3, scr.h - 4)
@@ -735,8 +773,8 @@ class FlowPanel:
                 pygame.draw.circle(surf, node_cols[i], (nx2, ny2), 4)
             pygame.draw.circle(surf, (120, 180, 240), (ncx2, ncy2), 5)
             pygame.draw.rect(surf, (90, 110, 180), rr, 1, border_radius=4)
-            rl = font_body.render("BIO NETWORK", True, (200, 225, 255))
-            surf.blit(rl, rl.get_rect(centerx=rr.centerx, bottom=rr.bottom - 1))
+            rl = font_body.render("BIO NET", True, (200, 225, 255))
+            surf.blit(rl, rl.get_rect(right=rr.right - 3, bottom=rr.bottom - 2))
 
             # ── Side labels ────────────────────────────────────────────────────
             lbl_left  = [("Hybrid", "AI Model"), ("Real-time", "State Est.")]
@@ -745,8 +783,6 @@ class FlowPanel:
             for i, (l1, l2) in enumerate(lbl_left):
                 ly = mon_y + 16 + i * 58
                 lbx = box2.left + 4
-                pygame.draw.rect(surf, PANEL_MID, (lbx, ly - 13, lbw, 34), border_radius=5)
-                pygame.draw.rect(surf, BLUE,      (lbx, ly - 13, lbw, 34), 1, border_radius=5)
                 surf.blit(font_body.render(l1, True, TEXT), (lbx + 4, ly - 10))
                 surf.blit(font_body.render(l2, True, TEXT), (lbx + 4, ly + 6))
                 ax = lbx + lbw; ay = ly + 4
@@ -756,8 +792,6 @@ class FlowPanel:
             for i, (l1, l2) in enumerate(lbl_right):
                 ly = mon_y + 16 + i * 58
                 lbx = box2.right - 4 - lbw
-                pygame.draw.rect(surf, PANEL_MID, (lbx, ly - 13, lbw, 34), border_radius=5)
-                pygame.draw.rect(surf, BLUE,      (lbx, ly - 13, lbw, 34), 1, border_radius=5)
                 surf.blit(font_body.render(l1, True, TEXT), (lbx + 4, ly - 10))
                 surf.blit(font_body.render(l2, True, TEXT), (lbx + 4, ly + 6))
                 ax = lbx; ay = ly + 4
@@ -766,19 +800,23 @@ class FlowPanel:
                 pygame.draw.polygon(surf, MID_GRAY,
                                     [(ax, ay), (ax - 8, ay - 4), (ax - 8, ay + 4)])
 
-            # Sub-labels below monitor
+            # Sub-labels below monitor — anchored to monitor stand bottom
+            stand_bottom = mon_y + mon_h + 18
             for i, txt in enumerate(["Hybrid AI ·  Real-time estimation",
                                       "Predictive control ·  OLR compensation"]):
                 surf.blit(font_body.render(txt, True, MID_GRAY),
                           font_body.render(txt, True, MID_GRAY)
-                          .get_rect(centerx=box2.centerx, centery=box2.bottom - 36 + i * 18))
+                          .get_rect(centerx=box2.centerx, centery=stand_bottom + 18 + i * 20))
 
             # Fast glowing AI packets
             pipe_len = (box2.bottom + 40 + 78) - box1.bottom
             for p in self.ai_pts:
                 p['p'] = (p['p'] + p['speed']) % 1.0
                 py = int(box1.bottom + p['p'] * pipe_len)
-                in_box = (box1.top < py < box1.bottom) or (box2.top + 2 < py < box2.bottom - 2)
+                box3_top = box2.bottom + 40
+                in_box = ((box1.top < py < box1.bottom)
+                          or (box2.top + 2 < py < box2.bottom - 2)
+                          or (box3_top < py < box3_top + 78))
                 if not in_box:
                     gs = pygame.Surface((18, 18), pygame.SRCALPHA)
                     pygame.draw.circle(gs, (30, 120, 255, 90), (9, 9), 8)
@@ -946,36 +984,41 @@ class Dashboard:
         self.show_sliders = self.demo
         self.warn_tick = 0
         self.processor = DataProcessor()
+        self._last_hw_switch: Optional[int] = None   # tracks physical switch to detect transitions
 
         self.reader: Optional[SerialReader] = None
         if not self.demo and port:
             self.reader = SerialReader(port, self.raw_queue)
             self.reader.start()
 
-    def _effective_ai(self, pkt: Optional[IMUPacket]) -> bool:
-        if self.mode_switch.active: return True
-        if pkt is not None:         return bool(pkt.switch == 1)
-        return False
+    def _effective_ai(self, _pkt: Optional[IMUPacket]) -> bool:
+        return self.mode_switch.active
 
     def update(self) -> None:
         self.tick += 1
         pkt: Optional[IMUPacket] = self.raw_queue[-1] if self.raw_queue else None
 
         if self.demo or pkt is None:
-            self.ai_mode   = self._effective_ai(None)
-            self.raw_state = ADState(self.temp_slider.value, self.ph_slider.value)
-            self.ad_state  = self.raw_state
+            self.ai_mode = self._effective_ai(None)
+            raw_t = self.temp_slider.value
+            raw_p = self.ph_slider.value
         else:
-            # Sync on-screen toggle to match physical hardware switch (visual confirmation)
-            self.mode_switch.active = bool(pkt.switch == 1)
-            self.ai_mode   = self._effective_ai(pkt)
-            self.raw_state = ADState(
-                temperature=_imu_map(pkt.pitch, -90.0, 90.0, TEMP_MIN, TEMP_MAX),
-                ph=         _imu_map(pkt.roll,  -90.0, 90.0, PH_MIN,   PH_MAX),
-            )
-            self.ad_state  = (self.processor.process_ai(pkt)
-                              if self.ai_mode
-                              else self.processor.process_manual(pkt))
+            # Only follow physical switch when it CHANGES so on-screen toggle stays clickable.
+            if pkt.switch != self._last_hw_switch:
+                self.mode_switch.active = bool(pkt.switch == 1)
+                self._last_hw_switch = pkt.switch
+            self.ai_mode = self._effective_ai(pkt)
+            raw_t = max(TEMP_MIN, min(TEMP_MAX,
+                _imu_map(pkt.pitch, PITCH_CENTER - PITCH_RANGE, PITCH_CENTER + PITCH_RANGE, TEMP_MIN, TEMP_MAX)))
+            raw_p = max(PH_MIN, min(PH_MAX,
+                _imu_map(-pkt.roll, ROLL_CENTER - ROLL_RANGE, ROLL_CENTER + ROLL_RANGE, PH_MIN, PH_MAX)))
+
+        # Raw state = unprocessed sensor reading (shown in Sensor Readings box)
+        self.raw_state = ADState(raw_t, raw_p)
+        # Always apply processing — makes manual/AI contrast visible even in demo mode
+        self.ad_state = (self.processor.process_ai(raw_t, raw_p, pkt)
+                         if self.ai_mode
+                         else self.processor.process_manual(raw_t, raw_p, pkt))
 
         self.reactor.update(self.ad_state)
         self.temp_gauge.update(self.ad_state.temperature)
