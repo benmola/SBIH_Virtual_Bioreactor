@@ -979,6 +979,7 @@ class Dashboard:
         self.raw_queue: collections.deque[IMUPacket] = collections.deque(maxlen=200)
         self.ad_state  = ADState()
         self.raw_state = ADState()
+        self._temp_indicator = self.ad_state.temperature
         self.ai_mode   = False
         self.demo      = demo or (port is None)
         self.show_sliders = self.demo
@@ -1021,7 +1022,9 @@ class Dashboard:
                          else self.processor.process_manual(raw_t, raw_p, pkt))
 
         self.reactor.update(self.ad_state)
-        self.temp_gauge.update(self.ad_state.temperature)
+        # Slow only temperature indicator movement (display smoothing only).
+        self._temp_indicator += (self.ad_state.temperature - self._temp_indicator) * 0.12
+        self.temp_gauge.update(self._temp_indicator)
         self.ph_gauge.update(self.ad_state.ph)
         # Biogas flow tracks reactor health: max 8 m³/day; stays in green when T+pH are healthy
         target_flow = self.reactor.health * 8.0 + random.gauss(0, 0.04)
